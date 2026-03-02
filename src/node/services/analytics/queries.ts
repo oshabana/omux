@@ -650,3 +650,418 @@ export async function executeNamedQuery(
       throw new Error(`Unknown analytics query: ${queryName}`);
   }
 }
+
+export const RAW_QUERY_ROW_LIMIT = 10_000;
+
+export interface RawQueryColumn {
+  name: string;
+  type: string;
+}
+
+export interface RawQueryResult {
+  columns: RawQueryColumn[];
+  rows: Array<Record<string, unknown>>;
+  truncated: boolean;
+  // When rowCountExact is false, this is a lower bound ("at least this many rows").
+  rowCount: number;
+  rowCountExact: boolean;
+  durationMs: number;
+}
+
+const RAW_QUERY_DISALLOWED_PATTERNS: RegExp[] = [
+  /"?\bread_csv\b"?\s*\(/i,
+  /"?\bread_csv_auto\b"?\s*\(/i,
+  /"?\bread_parquet\b"?\s*\(/i,
+  /"?\bread_json\b"?\s*\(/i,
+  /"?\bread_json_auto\b"?\s*\(/i,
+  /"?\bread_ndjson\b"?\s*\(/i,
+  /"?\bread_ndjson_auto\b"?\s*\(/i,
+  /"?\bread_blob\b"?\s*\(/i,
+  /"?\bread_text\b"?\s*\(/i,
+  /"?\bhttp_get\b"?\s*\(/i,
+  /"?\bhttp_post\b"?\s*\(/i,
+  /"?\bglob\b"?\s*\(/i,
+  /"?\blist_files\b"?\s*\(/i,
+  /"?\bduckdb_tables\b"?\s*\(/i,
+  /"?\bduckdb_columns\b"?\s*\(/i,
+  /"?\bduckdb_views\b"?\s*\(/i,
+  /"?\bduckdb_indexes\b"?\s*\(/i,
+  /"?\bduckdb_constraints\b"?\s*\(/i,
+  /"?\bduckdb_dependencies\b"?\s*\(/i,
+  /"?\bduckdb_functions\b"?\s*\(/i,
+  /"?\bduckdb_keywords\b"?\s*\(/i,
+  /"?\bduckdb_types\b"?\s*\(/i,
+  /"?\bduckdb_settings\b"?\s*\(/i,
+  /"?\bduckdb_databases\b"?\s*\(/i,
+  /"?\bduckdb_schemas\b"?\s*\(/i,
+  /"?\bduckdb_sequences\b"?\s*\(/i,
+  /"?\bduckdb_extensions\b"?\s*\(/i,
+  /(?:"?\binformation_schema\b"?)\s*\./i,
+  /(?:"?\bpg_catalog\b"?)\s*\./i,
+  /"?\bgenerate_series\b"?\s*\(/i,
+  /"?\b[a-zA-Z_][a-zA-Z0-9_]*_scan\b"?\s*\(/i,
+  /(^|[;(])\s*copy\b/i,
+  /(^|[;(])\s*export\b/i,
+  /(^|[;(])\s*import\b/i,
+  /(^|[;(])\s*attach\b/i,
+  /(^|[;(])\s*detach\b/i,
+  /(^|[;(])\s*install\b/i,
+  /(^|[;(])\s*load\b/i,
+  /(^|[;(])\s*pragma\b/i,
+  /(^|[;(])\s*set\b/i,
+];
+
+const RAW_QUERY_REPLACEMENT_SCAN_DIRECT_PATTERN = /\b(?:FROM|JOIN)\s+'/i;
+const RAW_QUERY_REPLACEMENT_SCAN_CLAUSE_TERMINATORS = new Set([
+  "WHERE",
+  "GROUP",
+  "HAVING",
+  "ORDER",
+  "LIMIT",
+  "QUALIFY",
+  "WINDOW",
+  "UNION",
+  "EXCEPT",
+  "INTERSECT",
+]);
+
+function isRawQueryIdentifierCharacter(character: string | undefined): boolean {
+  return character !== undefined && /[a-zA-Z0-9_$]/.test(character);
+}
+
+function isRawQueryKeywordStartCharacter(character: string | undefined): boolean {
+  return character !== undefined && /[a-zA-Z_]/.test(character);
+}
+
+function parseRawQueryKeyword(
+  sql: string,
+  startIndex: number
+): { keyword: string; endIndex: number } | null {
+  if (isRawQueryIdentifierCharacter(sql[startIndex - 1])) {
+    return null;
+  }
+
+  const firstCharacter = sql[startIndex];
+  if (!isRawQueryKeywordStartCharacter(firstCharacter)) {
+    return null;
+  }
+
+  let endIndex = startIndex + 1;
+  while (isRawQueryIdentifierCharacter(sql[endIndex])) {
+    endIndex += 1;
+  }
+
+  return {
+    keyword: sql.slice(startIndex, endIndex).toUpperCase(),
+    endIndex,
+  };
+}
+
+function findNextRawQueryNonWhitespaceIndex(sql: string, startIndex: number): number {
+  let index = startIndex;
+  while (index < sql.length && /\s/.test(sql[index])) {
+    index += 1;
+  }
+
+  return index;
+}
+
+function skipRawQuerySingleQuotedLiteral(sql: string, startIndex: number): number {
+  assert(sql[startIndex] === "'", "Expected to skip a single-quoted SQL literal");
+
+  let index = startIndex + 1;
+  while (index < sql.length) {
+    if (sql[index] === "'" && sql[index + 1] === "'") {
+      index += 2;
+      continue;
+    }
+
+    if (sql[index] === "'") {
+      return index + 1;
+    }
+
+    index += 1;
+  }
+
+  return index;
+}
+
+function hasRawQueryReplacementScanInFromClause(
+  sql: string,
+  fromClauseStartIndex: number,
+  fromClauseDepth: number
+): boolean {
+  let depth = fromClauseDepth;
+  let index = findNextRawQueryNonWhitespaceIndex(sql, fromClauseStartIndex);
+
+  if (sql[index] === "'") {
+    return true;
+  }
+
+  while (index < sql.length) {
+    const character = sql[index];
+
+    if (character === "'") {
+      index = skipRawQuerySingleQuotedLiteral(sql, index);
+      continue;
+    }
+
+    if (character === "(") {
+      depth += 1;
+      index += 1;
+      continue;
+    }
+
+    if (character === ")") {
+      if (depth === fromClauseDepth) {
+        return false;
+      }
+      depth -= 1;
+      index += 1;
+      continue;
+    }
+
+    if (depth === fromClauseDepth) {
+      if (character === ";") {
+        return false;
+      }
+
+      if (character === ",") {
+        const sourceStartIndex = findNextRawQueryNonWhitespaceIndex(sql, index + 1);
+        if (sql[sourceStartIndex] === "'") {
+          return true;
+        }
+      }
+
+      const keywordMatch = parseRawQueryKeyword(sql, index);
+      if (keywordMatch !== null) {
+        if (keywordMatch.keyword === "JOIN") {
+          const sourceStartIndex = findNextRawQueryNonWhitespaceIndex(sql, keywordMatch.endIndex);
+          if (sql[sourceStartIndex] === "'") {
+            return true;
+          }
+        }
+
+        if (RAW_QUERY_REPLACEMENT_SCAN_CLAUSE_TERMINATORS.has(keywordMatch.keyword)) {
+          return false;
+        }
+
+        index = keywordMatch.endIndex;
+        continue;
+      }
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+function hasRawQueryReplacementScan(sql: string): boolean {
+  if (RAW_QUERY_REPLACEMENT_SCAN_DIRECT_PATTERN.test(sql)) {
+    return true;
+  }
+
+  let depth = 0;
+  let index = 0;
+
+  while (index < sql.length) {
+    const character = sql[index];
+
+    if (character === "'") {
+      index = skipRawQuerySingleQuotedLiteral(sql, index);
+      continue;
+    }
+
+    if (character === "(") {
+      depth += 1;
+      index += 1;
+      continue;
+    }
+
+    if (character === ")") {
+      depth = Math.max(0, depth - 1);
+      index += 1;
+      continue;
+    }
+
+    const keywordMatch = parseRawQueryKeyword(sql, index);
+    if (keywordMatch?.keyword === "FROM") {
+      if (hasRawQueryReplacementScanInFromClause(sql, keywordMatch.endIndex, depth)) {
+        return true;
+      }
+      index = keywordMatch.endIndex;
+      continue;
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+function maskRawQueryLiteralsAndComments(
+  sql: string,
+  options: { maskStrings: boolean } = { maskStrings: true }
+): string {
+  const characters = Array.from(sql);
+  let index = 0;
+  const shouldMaskStrings = options.maskStrings;
+
+  while (index < characters.length) {
+    const char = characters[index];
+    const nextChar = characters[index + 1];
+
+    if (char === "'") {
+      if (shouldMaskStrings) {
+        characters[index] = " ";
+      }
+      index += 1;
+      while (index < characters.length) {
+        const current = characters[index];
+        const following = characters[index + 1];
+        if (shouldMaskStrings) {
+          characters[index] = " ";
+        }
+        if (current === "'" && following === "'") {
+          if (shouldMaskStrings) {
+            characters[index + 1] = " ";
+          }
+          index += 2;
+          continue;
+        }
+
+        index += 1;
+        if (current === "'") {
+          break;
+        }
+      }
+      continue;
+    }
+
+    if (char === "-" && nextChar === "-") {
+      characters[index] = " ";
+      characters[index + 1] = " ";
+      index += 2;
+      while (index < characters.length && characters[index] !== "\n") {
+        characters[index] = " ";
+        index += 1;
+      }
+      continue;
+    }
+
+    if (char === "/" && nextChar === "*") {
+      characters[index] = " ";
+      characters[index + 1] = " ";
+      index += 2;
+      while (index < characters.length) {
+        if (characters[index] === "*" && characters[index + 1] === "/") {
+          characters[index] = " ";
+          characters[index + 1] = " ";
+          index += 2;
+          break;
+        }
+
+        characters[index] = " ";
+        index += 1;
+      }
+      continue;
+    }
+
+    index += 1;
+  }
+
+  return characters.join("");
+}
+
+/**
+ * Security model for raw analytics SQL validation:
+ * 1) mask comments while preserving string literals,
+ * 2) block DuckDB replacement scans that use string literals as table sources,
+ * 3) mask string literals/comments before regex matching,
+ * 4) block dangerous functions/statements via RAW_QUERY_DISALLOWED_PATTERNS,
+ * 5) rely on executeRawQuery subquery wrapping plus read-only DuckDB connections.
+ */
+function validateRawQuerySql(cleanSql: string): void {
+  const commentMaskedSql = maskRawQueryLiteralsAndComments(cleanSql, {
+    maskStrings: false,
+  });
+
+  // Keep quote delimiters while masking literal contents so replacement-scan detection
+  // catches FROM/JOIN and comma-separated FROM sources without false positives from
+  // keywords embedded inside literal text.
+  const replacementScanMaskedSql = commentMaskedSql.replace(/'(?:[^']|'')*'/g, (literal) => {
+    assert(literal.length >= 2, "Single-quoted SQL literal must include delimiters");
+    return `'${" ".repeat(literal.length - 2)}'`;
+  });
+
+  if (hasRawQueryReplacementScan(replacementScanMaskedSql)) {
+    throw new Error(
+      "String literals cannot be used as table sources (DuckDB replacement scans are not allowed)"
+    );
+  }
+
+  const fullyMaskedSql = maskRawQueryLiteralsAndComments(commentMaskedSql);
+
+  for (const pattern of RAW_QUERY_DISALLOWED_PATTERNS) {
+    if (pattern.test(fullyMaskedSql)) {
+      throw new Error(`Query contains disallowed SQL: ${pattern.source.replace(/\b/g, "")}`);
+    }
+  }
+}
+
+/**
+ * Execute arbitrary user SQL as a read-only subquery with a hard row cap.
+ * Wrapping the statement in a subquery prevents DML/DDL execution,
+ * validateRawQuerySql blocks dangerous functions/statements, and
+ * the DuckDB connection remains read-only.
+ */
+export async function executeRawQuery(
+  conn: DuckDBConnection,
+  sql: string
+): Promise<RawQueryResult> {
+  assert(
+    typeof sql === "string" && sql.trim().length > 0,
+    "executeRawQuery requires non-empty SQL"
+  );
+
+  const cleanSql = sql.trim().replace(/;+$/, "").trim();
+  assert(cleanSql.length > 0, "executeRawQuery requires SQL with at least one statement");
+
+  validateRawQuerySql(cleanSql);
+
+  const fetchLimit = RAW_QUERY_ROW_LIMIT + 1;
+  const wrappedSql = `SELECT * FROM (\n${cleanSql}\n) AS __q LIMIT ${fetchLimit}`;
+
+  const startMs = performance.now();
+  const result = await conn.run(wrappedSql);
+  const rawRows = await result.getRowObjectsJS();
+  const durationMs = Math.round(performance.now() - startMs);
+
+  const columns: RawQueryColumn[] = [];
+  for (let index = 0; index < result.columnCount; index += 1) {
+    columns.push({
+      name: result.columnName(index),
+      type: String(result.columnType(index)),
+    });
+  }
+
+  const rowCount = rawRows.length;
+  const truncated = rowCount > RAW_QUERY_ROW_LIMIT;
+  const rows = truncated ? rawRows.slice(0, RAW_QUERY_ROW_LIMIT) : rawRows;
+  const rowCountExact = !truncated;
+
+  assert(
+    rowCount <= fetchLimit,
+    `Raw query row count (${rowCount}) exceeded fetch limit (${fetchLimit})`
+  );
+
+  return {
+    columns,
+    rows: rows.map(normalizeDuckDbRow),
+    truncated,
+    rowCount,
+    rowCountExact,
+    durationMs,
+  };
+}
