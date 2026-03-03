@@ -12,6 +12,7 @@ import { Switch } from "@/browser/components/Switch/Switch";
 import { usePersistedState } from "@/browser/hooks/usePersistedState";
 import { useAPI } from "@/browser/contexts/API";
 import { useFeatureFlags } from "@/browser/contexts/FeatureFlagsContext";
+import { CUSTOM_EVENTS, createCustomEvent } from "@/common/constants/events";
 import {
   EDITOR_CONFIG_KEY,
   DEFAULT_EDITOR_CONFIG,
@@ -173,11 +174,15 @@ export function GeneralSection() {
 
   // Backend config: default to ON so archiving is safest even before async load completes.
   const [stopCoderWorkspaceOnArchive, setStopCoderWorkspaceOnArchive] = useState(true);
+  const [llmDebugLogs, setLlmDebugLogs] = useState(false);
   const stopCoderWorkspaceOnArchiveLoadNonceRef = useRef(0);
+
+  const llmDebugLogsLoadNonceRef = useRef(0);
 
   // updateCoderPrefs writes config.json on the backend. Serialize (and coalesce) updates so rapid
   // toggles can't race and persist a stale value via out-of-order writes.
   const stopCoderWorkspaceOnArchiveUpdateChainRef = useRef<Promise<void>>(Promise.resolve());
+  const llmDebugLogsUpdateChainRef = useRef<Promise<void>>(Promise.resolve());
   const stopCoderWorkspaceOnArchivePendingUpdateRef = useRef<boolean | undefined>(undefined);
 
   useEffect(() => {
@@ -185,17 +190,21 @@ export function GeneralSection() {
       return;
     }
 
-    const nonce = ++stopCoderWorkspaceOnArchiveLoadNonceRef.current;
+    const stopCoderWorkspaceOnArchiveNonce = ++stopCoderWorkspaceOnArchiveLoadNonceRef.current;
+    const llmDebugLogsNonce = ++llmDebugLogsLoadNonceRef.current;
 
     void api.config
       .getConfig()
       .then((cfg) => {
         // If the user toggled the setting while this request was in flight, keep the UI selection.
-        if (nonce !== stopCoderWorkspaceOnArchiveLoadNonceRef.current) {
-          return;
+        if (stopCoderWorkspaceOnArchiveNonce === stopCoderWorkspaceOnArchiveLoadNonceRef.current) {
+          setStopCoderWorkspaceOnArchive(cfg.stopCoderWorkspaceOnArchive);
         }
 
-        setStopCoderWorkspaceOnArchive(cfg.stopCoderWorkspaceOnArchive);
+        // Use an independent nonce so debug-log toggles do not discard archive-setting updates.
+        if (llmDebugLogsNonce === llmDebugLogsLoadNonceRef.current) {
+          setLlmDebugLogs(cfg.llmDebugLogs === true);
+        }
       })
       .catch(() => {
         // Best-effort only. Keep the default (ON) if config fails to load.
@@ -241,6 +250,34 @@ export function GeneralSection() {
     },
     [api]
   );
+
+  const handleLlmDebugLogsChange = (checked: boolean) => {
+    // Invalidate any in-flight debug-log load so it doesn't overwrite the user's selection.
+    llmDebugLogsLoadNonceRef.current++;
+    setLlmDebugLogs(checked);
+    window.dispatchEvent(
+      createCustomEvent(CUSTOM_EVENTS.LLM_DEBUG_LOGS_CHANGED, {
+        enabled: checked,
+      })
+    );
+
+    if (!api?.config?.updateLlmDebugLogs) {
+      return;
+    }
+
+    // Serialize writes so rapid toggles always persist the last user choice.
+    llmDebugLogsUpdateChainRef.current = llmDebugLogsUpdateChainRef.current
+      .catch(() => {
+        // Best-effort only.
+      })
+      .then(() => api.config.updateLlmDebugLogs({ enabled: checked }))
+      .then(() => {
+        // Coerce the chain back to Promise<void>.
+      })
+      .catch(() => {
+        // Best-effort persistence.
+      });
+  };
 
   const { statsTabState, setStatsTabEnabled } = useFeatureFlags();
 
@@ -440,6 +477,20 @@ export function GeneralSection() {
               checked={statsTabState?.enabled ?? true}
               onCheckedChange={handleStatsTabToggle}
               aria-label="Toggle Stats tab"
+            />
+          </div>
+
+          <div className="flex items-center justify-between py-3">
+            <div className="flex-1 pr-4">
+              <div className="text-foreground text-sm">API Debug Logs</div>
+              <div className="text-muted mt-0.5 text-xs">
+                Record the full input and output of every AI API call
+              </div>
+            </div>
+            <Switch
+              checked={llmDebugLogs}
+              onCheckedChange={handleLlmDebugLogsChange}
+              aria-label="Toggle API Debug Logs"
             />
           </div>
         </div>

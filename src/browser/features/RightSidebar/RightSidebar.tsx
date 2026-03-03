@@ -20,6 +20,7 @@ import { ErrorBoundary } from "@/browser/components/ErrorBoundary/ErrorBoundary"
 import { ReviewPanel } from "@/browser/features/RightSidebar/CodeReview/ReviewPanel";
 import { OutputTab } from "@/browser/components/OutputTab/OutputTab";
 
+import { DevToolsTab } from "./DevToolsTab";
 import {
   matchesKeybind,
   KEYBINDS,
@@ -84,6 +85,7 @@ import {
   getTabContentClassName,
   type ReviewStats,
 } from "@/browser/features/RightSidebar/Tabs";
+import { DebugTabLabel } from "./Tabs/TabLabels";
 import { FileViewerTab } from "@/browser/features/RightSidebar/FileViewer";
 import { ExplorerTab } from "@/browser/features/RightSidebar/ExplorerTab";
 import {
@@ -385,6 +387,8 @@ const RightSidebarTabsetNode: React.FC<RightSidebarTabsetNodeProps> = (props) =>
       label = <ExplorerTabLabel />;
     } else if (tab === "output") {
       label = <OutputTabLabel />;
+    } else if (tab === "debug") {
+      label = <DebugTabLabel />;
     } else if (isTerminal) {
       const terminalIndex = terminalTabs.indexOf(tab);
       label = (
@@ -425,11 +429,13 @@ const RightSidebarTabsetNode: React.FC<RightSidebarTabsetNodeProps> = (props) =>
   const reviewPanelId = `${tabsetBaseId}-panel-review`;
   const explorerPanelId = `${tabsetBaseId}-panel-explorer`;
   const outputPanelId = `${tabsetBaseId}-panel-output`;
+  const debugPanelId = `${tabsetBaseId}-panel-debug`;
 
   const costsTabId = `${tabsetBaseId}-tab-costs`;
   const reviewTabId = `${tabsetBaseId}-tab-review`;
   const explorerTabId = `${tabsetBaseId}-tab-explorer`;
   const outputTabId = `${tabsetBaseId}-tab-output`;
+  const debugTabId = `${tabsetBaseId}-tab-debug`;
 
   // Generate sortable IDs for tabs in this tabset
   const sortableIds = items.map((item) => `${props.node.id}:${item.tab}`);
@@ -512,6 +518,14 @@ const RightSidebarTabsetNode: React.FC<RightSidebarTabsetNodeProps> = (props) =>
         {props.node.activeTab === "output" && (
           <div role="tabpanel" id={outputPanelId} aria-labelledby={outputTabId} className="h-full">
             <OutputTab workspaceId={props.workspaceId} />
+          </div>
+        )}
+
+        {props.node.activeTab === "debug" && (
+          <div role="tabpanel" id={debugPanelId} aria-labelledby={debugTabId}>
+            <ErrorBoundary workspaceInfo="Debug tab">
+              <DevToolsTab workspaceId={props.workspaceId} />
+            </ErrorBoundary>
           </div>
         )}
 
@@ -645,6 +659,61 @@ const RightSidebarComponent: React.FC<RightSidebarProps> = ({
 
   const [isTouchReviewImmersive, setIsTouchReviewImmersive] = React.useState(false);
 
+  // API for reading config and managing terminal sessions.
+  const { api } = useAPI();
+  const [llmDebugLogsEnabled, setLlmDebugLogsEnabled] = React.useState<boolean | null>(null);
+  const debugLogsLocalOverrideRef = React.useRef(false);
+
+  React.useEffect(() => {
+    if (!api) {
+      setLlmDebugLogsEnabled(null);
+      return;
+    }
+
+    // Reset local override so a fresh config fetch can set the initial value.
+    debugLogsLocalOverrideRef.current = false;
+    let cancelled = false;
+
+    void api.config
+      .getConfig()
+      .then((cfg) => {
+        if (cancelled) {
+          return;
+        }
+
+        // If the user toggled debug logs while this config fetch was in flight,
+        // the event listener has already set the authoritative value.
+        if (debugLogsLocalOverrideRef.current) {
+          return;
+        }
+
+        setLlmDebugLogsEnabled(cfg.llmDebugLogs === true);
+      })
+      .catch(() => {
+        if (cancelled) {
+          return;
+        }
+
+        setLlmDebugLogsEnabled(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
+
+  React.useEffect(() => {
+    const handleLlmDebugLogsChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{ enabled: boolean }>).detail;
+      debugLogsLocalOverrideRef.current = true;
+      setLlmDebugLogsEnabled(detail?.enabled === true);
+    };
+
+    window.addEventListener(CUSTOM_EVENTS.LLM_DEBUG_LOGS_CHANGED, handleLlmDebugLogsChanged);
+    return () =>
+      window.removeEventListener(CUSTOM_EVENTS.LLM_DEBUG_LOGS_CHANGED, handleLlmDebugLogsChanged);
+  }, []);
+
   // Read last-used focused tab for better defaults when initializing a new layout.
   const initialActiveTab = React.useMemo<TabType>(() => {
     const raw = readPersistedState<string>(RIGHT_SIDEBAR_TAB_KEY, "costs");
@@ -717,6 +786,32 @@ const RightSidebarComponent: React.FC<RightSidebarProps> = ({
 
   // Legacy "stats" tabs in persisted layouts are stripped during parsing
   // (see stripLegacyStatsTab in rightSidebarLayout.ts).
+  // If LLM debug logs are enabled, ensure the Debug tab exists in the layout.
+  // If disabled, ensure it doesn't linger in persisted layouts.
+  React.useEffect(() => {
+    // Skip layout mutations until the config has been loaded. Using null
+    // as the initial state prevents pruning debug tabs from persisted layouts
+    // before we know the real setting.
+    if (llmDebugLogsEnabled == null) {
+      return;
+    }
+
+    setLayoutRaw((prevRaw) => {
+      const prev = parseRightSidebarLayoutState(prevRaw, initialActiveTab);
+      const hasDebug = collectAllTabs(prev.root).includes("debug");
+
+      if (llmDebugLogsEnabled && !hasDebug) {
+        // Add debug tab to the focused tabset without stealing focus.
+        return addTabToFocusedTabset(prev, "debug", false);
+      }
+
+      if (!llmDebugLogsEnabled && hasDebug) {
+        return removeTabEverywhere(prev, "debug");
+      }
+
+      return prev;
+    });
+  }, [initialActiveTab, layoutRaw, llmDebugLogsEnabled, setLayoutRaw]);
   // If we ever deserialize an invalid layout (e.g. schema changes), reset to defaults.
   React.useEffect(() => {
     if (!isRightSidebarLayoutState(layoutRaw)) {
@@ -887,9 +982,6 @@ const RightSidebarComponent: React.FC<RightSidebarProps> = ({
     const stored = readPersistedState<Record<string, string>>(terminalTitlesKey, {});
     return new Map(Object.entries(stored) as Array<[TabType, string]>);
   });
-
-  // API for opening terminal windows and managing sessions
-  const { api } = useAPI();
 
   const removeTerminalTab = React.useCallback(
     (tab: TabType) => {

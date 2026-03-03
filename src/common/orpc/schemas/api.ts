@@ -1610,6 +1610,7 @@ export const config = {
       // Mux Governor enrollment status (safe fields only - token never exposed)
       muxGovernorUrl: z.string().nullable(),
       muxGovernorEnrolled: z.boolean(),
+      llmDebugLogs: z.boolean(),
       onePasswordAccountName: z.string().nullish(),
     }),
   },
@@ -1669,9 +1670,155 @@ export const config = {
       .strict(),
     output: z.void(),
   },
+  updateLlmDebugLogs: {
+    input: z
+      .object({
+        enabled: z.boolean(),
+      })
+      .strict(),
+    output: z.void(),
+  },
   unenrollMuxGovernor: {
     input: z.void(),
     output: z.void(),
+  },
+};
+
+const DevToolsInputTokenBreakdownSchema = z.object({
+  total: z.number(),
+  noCache: z.number().optional(),
+  cacheRead: z.number().optional(),
+  cacheWrite: z.number().optional(),
+});
+
+const DevToolsOutputTokenBreakdownSchema = z.object({
+  total: z.number(),
+  text: z.number().optional(),
+  reasoning: z.number().optional(),
+});
+
+const DevToolsUsageSchema = z.object({
+  inputTokens: z.union([z.number(), DevToolsInputTokenBreakdownSchema]).optional(),
+  outputTokens: z.union([z.number(), DevToolsOutputTokenBreakdownSchema]).optional(),
+  totalTokens: z.number().optional(),
+  raw: z.unknown().optional(),
+});
+
+const DevToolsStepInputSchema = z.object({
+  prompt: z.unknown(),
+  tools: z.unknown().optional(),
+  toolChoice: z.unknown().optional(),
+  maxOutputTokens: z.number().optional(),
+  temperature: z.number().optional(),
+  providerOptions: z.unknown().optional(),
+});
+
+const DevToolsStepOutputSchema = z.object({
+  content: z.unknown().optional(),
+  finishReason: z.string().optional(),
+  textParts: z.array(z.object({ id: z.string(), text: z.string() })).optional(),
+  reasoningParts: z.array(z.object({ id: z.string(), text: z.string() })).optional(),
+  toolCalls: z.array(z.unknown()).optional(),
+});
+
+const DevToolsStepSchema = z.object({
+  id: z.string(),
+  runId: z.string(),
+  stepNumber: z.number(),
+  type: z.enum(["generate", "stream"]),
+  modelId: z.string(),
+  provider: z.string().nullable(),
+  startedAt: z.string(),
+  durationMs: z.number().nullable(),
+  input: DevToolsStepInputSchema.nullable(),
+  output: DevToolsStepOutputSchema.nullable(),
+  usage: DevToolsUsageSchema.nullable(),
+  error: z.string().nullable(),
+  rawRequest: z.unknown().nullable(),
+  requestHeaders: z.record(z.string(), z.string()).nullable(),
+  responseHeaders: z.record(z.string(), z.string()).nullable(),
+  rawResponse: z.unknown().nullable(),
+  rawChunks: z.unknown().nullable(),
+});
+
+const DevToolsRunSummarySchema = z.object({
+  id: z.string(),
+  workspaceId: z.string(),
+  startedAt: z.string(),
+  stepCount: z.number(),
+  firstMessage: z.string(),
+  hasError: z.boolean(),
+  isInProgress: z.boolean(),
+  totalDurationMs: z.number().nullable(),
+  modelId: z.string().nullable(),
+});
+
+const DevToolsEventSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("snapshot"),
+    runs: z.array(DevToolsRunSummarySchema),
+  }),
+  z.object({
+    type: z.literal("run-created"),
+    run: DevToolsRunSummarySchema,
+  }),
+  z.object({
+    type: z.literal("run-updated"),
+    run: DevToolsRunSummarySchema,
+  }),
+  z.object({
+    type: z.literal("step-created"),
+    step: DevToolsStepSchema,
+  }),
+  z.object({
+    type: z.literal("step-updated"),
+    step: DevToolsStepSchema,
+  }),
+  z.object({
+    type: z.literal("cleared"),
+  }),
+]);
+
+export const devtools = {
+  getRuns: {
+    input: z
+      .object({
+        workspaceId: z.string(),
+      })
+      .strict(),
+    output: z.array(DevToolsRunSummarySchema),
+  },
+  getRunDetail: {
+    input: z
+      .object({
+        workspaceId: z.string(),
+        runId: z.string(),
+      })
+      .strict(),
+    output: z
+      .object({
+        run: DevToolsRunSummarySchema,
+        steps: z.array(DevToolsStepSchema),
+      })
+      .nullable(),
+  },
+  clear: {
+    input: z
+      .object({
+        workspaceId: z.string(),
+      })
+      .strict(),
+    output: z.object({
+      success: z.boolean(),
+    }),
+  },
+  subscribe: {
+    input: z
+      .object({
+        workspaceId: z.string(),
+      })
+      .strict(),
+    output: eventIterator(DevToolsEventSchema),
   },
 };
 
