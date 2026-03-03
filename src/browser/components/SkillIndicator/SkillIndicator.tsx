@@ -181,6 +181,7 @@ export const SkillIndicator: React.FC<SkillIndicatorProps> = (props) => {
   const invalidCount = props.invalidSkills?.length ?? 0;
   const loadErrorCount = props.skillLoadErrors?.length ?? 0;
   const errorCount = invalidCount + loadErrorCount;
+  const badgeCount = errorCount > 0 ? errorCount : loadedCount;
 
   // Don't render if there's nothing to show.
   if (totalCount === 0 && errorCount === 0) {
@@ -247,7 +248,7 @@ export const SkillIndicator: React.FC<SkillIndicatorProps> = (props) => {
               errorCount === 0 && (loadedCount > 0 ? "text-foreground" : "text-muted")
             )}
           >
-            {loadedCount}
+            {badgeCount}
           </span>
         </span>
       </button>
