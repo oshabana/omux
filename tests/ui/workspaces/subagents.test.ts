@@ -34,6 +34,20 @@ function getWorkspaceRow(container: HTMLElement, workspaceId: string): HTMLEleme
   ) as HTMLElement | null;
 }
 
+function getSubagentConnector(container: HTMLElement, workspaceId: string): HTMLElement | null {
+  // Find all connector elements and match by shared parent with the target workspace row.
+  // This avoids fragile sibling/parent traversal assumptions.
+  const connectors = container.querySelectorAll('[data-testid="subagent-connector"]');
+  for (const connector of connectors) {
+    const wrapper = connector.parentElement;
+    if (!wrapper) continue;
+    if (wrapper.querySelector(`[data-workspace-id="${workspaceId}"]`)) {
+      return connector as HTMLElement;
+    }
+  }
+  return null;
+}
+
 async function createWorkspaceWithTitle(params: {
   projectPath: string;
   trunkBranch: string;
@@ -500,6 +514,182 @@ describe("Workspace sidebar completed sub-agent expansion (UI)", () => {
         'button[aria-label^="Expand workspaces older than "]'
       );
       expect(ageTierExpandButton).toBeNull();
+    } finally {
+      if (view && cleanupDom) {
+        await cleanupView(view, cleanupDom);
+      } else if (cleanupDom) {
+        cleanupDom();
+      }
+
+      for (const workspaceId of workspaceIdsToRemove.reverse()) {
+        try {
+          await env.orpc.workspace.remove({ workspaceId, options: { force: true } });
+        } catch {
+          // Best effort cleanup.
+        }
+      }
+
+      await cleanupTestEnvironment(env);
+      await cleanupTempGitRepo(repoPath);
+    }
+  }, 90_000);
+
+  test("renders active connector classes for running sub-agents", async () => {
+    const env = await createTestEnvironment();
+    const repoPath = await createTempGitRepo();
+
+    const workspaceIdsToRemove: string[] = [];
+    let view: RenderedApp | undefined;
+    let cleanupDom: (() => void) | undefined;
+
+    try {
+      await trustProject(env, repoPath);
+      const trunkBranch = await detectDefaultTrunkBranch(repoPath);
+
+      const parentWorkspace = await createWorkspaceWithTitle({
+        env,
+        projectPath: repoPath,
+        trunkBranch,
+        title: "Connector Parent",
+        branchPrefix: "subagent-connector-parent",
+      });
+      workspaceIdsToRemove.push(parentWorkspace.id);
+
+      const runningChild = await createWorkspaceWithTitle({
+        env,
+        projectPath: repoPath,
+        trunkBranch,
+        title: "Running Child",
+        branchPrefix: "subagent-connector-running",
+      });
+      workspaceIdsToRemove.push(runningChild.id);
+
+      await env.config.addWorkspace(repoPath, {
+        ...runningChild,
+        parentWorkspaceId: parentWorkspace.id,
+        taskStatus: "running",
+      });
+
+      cleanupDom = installDom();
+      view = renderApp({ apiClient: env.orpc, metadata: parentWorkspace });
+      await setupWorkspaceView(view, parentWorkspace, parentWorkspace.id);
+
+      if (!view) {
+        throw new Error("View did not initialize");
+      }
+      const renderedView = view;
+
+      await waitFor(
+        () => {
+          const childRow = getWorkspaceRow(renderedView.container, runningChild.id);
+          if (!childRow) {
+            throw new Error("Expected running child row to be visible");
+          }
+
+          const connector = getSubagentConnector(renderedView.container, runningChild.id);
+          if (!connector) {
+            throw new Error("Expected running child connector to be rendered");
+          }
+
+          const activeSegments = connector.querySelectorAll("span.subagent-connector-active");
+          if (activeSegments.length === 0) {
+            throw new Error("Expected active connector segments for running child");
+          }
+
+          const animatedElbow = connector.querySelector("path.subagent-connector-elbow-active");
+          if (!animatedElbow) {
+            throw new Error("Expected animated connector elbow for running child");
+          }
+        },
+        { timeout: 10_000 }
+      );
+    } finally {
+      if (view && cleanupDom) {
+        await cleanupView(view, cleanupDom);
+      } else if (cleanupDom) {
+        cleanupDom();
+      }
+
+      for (const workspaceId of workspaceIdsToRemove.reverse()) {
+        try {
+          await env.orpc.workspace.remove({ workspaceId, options: { force: true } });
+        } catch {
+          // Best effort cleanup.
+        }
+      }
+
+      await cleanupTestEnvironment(env);
+      await cleanupTempGitRepo(repoPath);
+    }
+  }, 90_000);
+
+  test("does not render active connector classes for non-running sub-agents", async () => {
+    const env = await createTestEnvironment();
+    const repoPath = await createTempGitRepo();
+
+    const workspaceIdsToRemove: string[] = [];
+    let view: RenderedApp | undefined;
+    let cleanupDom: (() => void) | undefined;
+
+    try {
+      await trustProject(env, repoPath);
+      const trunkBranch = await detectDefaultTrunkBranch(repoPath);
+
+      const parentWorkspace = await createWorkspaceWithTitle({
+        env,
+        projectPath: repoPath,
+        trunkBranch,
+        title: "Connector Parent",
+        branchPrefix: "subagent-connector-parent-queued",
+      });
+      workspaceIdsToRemove.push(parentWorkspace.id);
+
+      const queuedChild = await createWorkspaceWithTitle({
+        env,
+        projectPath: repoPath,
+        trunkBranch,
+        title: "Queued Child",
+        branchPrefix: "subagent-connector-queued",
+      });
+      workspaceIdsToRemove.push(queuedChild.id);
+
+      await env.config.addWorkspace(repoPath, {
+        ...queuedChild,
+        parentWorkspaceId: parentWorkspace.id,
+        taskStatus: "queued",
+      });
+
+      cleanupDom = installDom();
+      view = renderApp({ apiClient: env.orpc, metadata: parentWorkspace });
+      await setupWorkspaceView(view, parentWorkspace, parentWorkspace.id);
+
+      if (!view) {
+        throw new Error("View did not initialize");
+      }
+      const renderedView = view;
+
+      // Wait for the queued child row to appear in the sidebar.
+      await waitFor(
+        () => {
+          const childRow = getWorkspaceRow(renderedView.container, queuedChild.id);
+          if (!childRow) {
+            throw new Error("Expected queued child row to be visible");
+          }
+        },
+        { timeout: 10_000 }
+      );
+
+      // A queued sub-agent should NOT have active connector segments
+      // (only "running" status triggers the active animation).
+      const activeSegments = renderedView.container.querySelectorAll(
+        "span.subagent-connector-active"
+      );
+      expect(activeSegments.length).toBe(0);
+
+      const animatedElbows = renderedView.container.querySelectorAll(
+        "path.subagent-connector-elbow-active"
+      );
+      expect(animatedElbows.length).toBe(0);
     } finally {
       if (view && cleanupDom) {
         await cleanupView(view, cleanupDom);
