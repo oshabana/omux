@@ -16,7 +16,12 @@ import {
   isCodexOauthAllowedModelId,
   isCodexOauthRequiredModelId,
 } from "@/common/constants/codexOAuth";
+import {
+  isClaudeOauthAllowedModelId,
+  isClaudeOauthRequiredModelId,
+} from "@/common/constants/claudeOAuth";
 import { parseCodexOauthAuth } from "@/node/utils/codexOauthAuth";
+import { parseClaudeOauthAuth } from "@/node/utils/claudeOauthAuth";
 import type { Config, ProviderConfig, ProvidersConfig } from "@/node/config";
 import type { MuxProviderOptions } from "@/common/types/providerOptions";
 import type { ExternalSecretResolver } from "@/common/types/secrets";
@@ -25,6 +30,7 @@ import { isProviderDisabledInConfig } from "@/common/utils/providers/isProviderD
 import type { PolicyService } from "@/node/services/policyService";
 import type { ProviderService } from "@/node/services/providerService";
 import type { CodexOauthService } from "@/node/services/codexOauthService";
+import type { ClaudeOauthService } from "@/node/services/claudeOauthService";
 import type { DevToolsService } from "@/node/services/devToolsService";
 import { captureAndStripDevToolsHeader } from "@/node/services/devToolsHeaderCapture";
 import { createDevToolsMiddleware } from "@/node/services/devToolsMiddleware";
@@ -543,6 +549,7 @@ export class ProviderModelFactory {
   private readonly policyService?: PolicyService;
   private readonly devToolsService?: DevToolsService;
   codexOauthService?: CodexOauthService;
+  claudeOauthService?: ClaudeOauthService;
 
   constructor(
     config: Config,
@@ -550,13 +557,15 @@ export class ProviderModelFactory {
     policyService?: PolicyService,
     codexOauthService?: CodexOauthService,
     devToolsService?: DevToolsService,
-    private readonly opResolver?: ExternalSecretResolver
+    private readonly opResolver?: ExternalSecretResolver,
+    claudeOauthService?: ClaudeOauthService
   ) {
     this.config = config;
     this.providerService = providerService;
     this.policyService = policyService;
     this.codexOauthService = codexOauthService;
     this.devToolsService = devToolsService;
+    this.claudeOauthService = claudeOauthService;
   }
 
   /**
@@ -771,21 +780,77 @@ export class ProviderModelFactory {
 
       // Handle Anthropic provider
       if (providerName === "anthropic") {
+        const fullModelId = `${providerName}:${modelId}`;
+
+        const claudeOauthAllowed = isClaudeOauthAllowedModelId(fullModelId);
+        const claudeOauthRequired = isClaudeOauthRequiredModelId(fullModelId);
+
+        const storedClaudeOauth = parseClaudeOauthAuth(
+          (providerConfig as { claudeOauth?: unknown }).claudeOauth
+        );
+
         // Resolve credentials from config + env (single source of truth)
         const creds = resolveProviderCredentials("anthropic", providerConfig);
-        if (!creds.isConfigured) {
+
+        // When a model requires Claude OAuth but the user hasn't connected it,
+        // fall back to their API key instead of blocking entirely. If the model
+        // truly only works through OAuth, Anthropic's API will return a clear error.
+        if (claudeOauthRequired && !storedClaudeOauth && !creds.isConfigured) {
+          return Err({ type: "oauth_not_connected", provider: providerName });
+        }
+
+        const claudeOauthDefaultAuthRaw = (providerConfig as { claudeOauthDefaultAuth?: unknown })
+          .claudeOauthDefaultAuth;
+        const claudeOauthDefaultAuth = claudeOauthDefaultAuthRaw === "apiKey" ? "apiKey" : "oauth";
+
+        // Claude OAuth routing:
+        // - Required models route through OAuth when connected.
+        // - If OAuth is not connected, fall back to API key (if available).
+        // - Allowed models route through OAuth only when:
+        //   - no API key is configured, OR
+        //   - the user prefers OAuth when both are set.
+        const shouldRouteThroughClaudeOauth = (() => {
+          if (!claudeOauthAllowed || !storedClaudeOauth) {
+            return false;
+          }
+
+          if (claudeOauthRequired) {
+            return true;
+          }
+
+          if (!creds.isConfigured) {
+            return true;
+          }
+
+          return claudeOauthDefaultAuth === "oauth";
+        })();
+
+        // Only resolve op:// references when this request will use API-key auth.
+        // OAuth requests use a placeholder key and override auth headers in fetch().
+        const resolvedApiKey = shouldRouteThroughClaudeOauth
+          ? undefined
+          : await this.resolveApiKey(creds.apiKey);
+
+        // Defer op:// key failure until after OAuth routing is evaluated —
+        // OAuth-eligible models can proceed without an API key.
+        const opRefFailed =
+          !shouldRouteThroughClaudeOauth &&
+          creds.apiKey != null &&
+          isOpReference(creds.apiKey) &&
+          !resolvedApiKey;
+
+        // When not routing through OAuth, require a valid API key.
+        if (!shouldRouteThroughClaudeOauth && !creds.isConfigured) {
+          return Err({ type: "api_key_not_found", provider: providerName });
+        }
+        if (opRefFailed) {
           return Err({ type: "api_key_not_found", provider: providerName });
         }
 
-        // Resolve op:// reference if API key is a 1Password reference
-        const resolvedApiKey = await this.resolveApiKey(creds.apiKey);
-        if (creds.apiKey && isOpReference(creds.apiKey) && !resolvedApiKey) {
-          return Err({ type: "api_key_not_found", provider: providerName });
-        }
-
-        // Build config with resolved credentials
-        const configWithApiKey = resolvedApiKey
-          ? { ...providerConfig, apiKey: resolvedApiKey }
+        // Build config with resolved credentials (or placeholder for OAuth)
+        const effectiveApiKey = shouldRouteThroughClaudeOauth ? "claude-oauth" : resolvedApiKey;
+        const configWithApiKey = effectiveApiKey
+          ? { ...providerConfig, apiKey: effectiveApiKey }
           : providerConfig;
 
         // Normalize base URL to ensure /v1 suffix (SDK expects it)
@@ -808,7 +873,50 @@ export class ProviderModelFactory {
         const fetchWithCacheControl = disableBeta
           ? baseFetch
           : wrapFetchWithAnthropicCacheControl(baseFetch, effectiveAnthropicCacheTtl);
-        const providerFetch = fetchWithCacheControl;
+
+        const claudeOauthService = this.claudeOauthService;
+
+        // When routing through Claude OAuth, wrap fetch to inject bearer token
+        // and strip the SDK's x-api-key header. The cache control wrapper stays
+        // in the chain — OAuth fetch wraps around it.
+        const providerFetch = shouldRouteThroughClaudeOauth
+          ? (Object.assign(
+              async (
+                input: Parameters<typeof fetch>[0],
+                init?: Parameters<typeof fetch>[1]
+              ): Promise<Response> => {
+                const urlString = typeof input === "string" ? input : input instanceof URL ? input.toString() : "";
+                // Only intercept requests to the Anthropic API
+                const isAnthropicRequest =
+                  urlString.includes("anthropic.com") ||
+                  (effectiveBaseURL != null && urlString.startsWith(effectiveBaseURL));
+
+                if (!isAnthropicRequest) {
+                  return fetchWithCacheControl(input, init);
+                }
+
+                if (!claudeOauthService) {
+                  throw new Error("Claude OAuth service not initialized");
+                }
+
+                const authResult = await claudeOauthService.getValidAuth();
+                if (!authResult.success) {
+                  throw new Error(authResult.error);
+                }
+
+                const headers = new Headers(init?.headers);
+                headers.set("Authorization", `Bearer ${authResult.data.access}`);
+                // Remove SDK-set API key header — OAuth uses Authorization bearer instead
+                headers.delete("x-api-key");
+
+                return fetchWithCacheControl(input, { ...(init ?? {}), headers });
+              },
+              "preconnect" in fetchWithCacheControl && typeof fetchWithCacheControl.preconnect === "function"
+                ? { preconnect: fetchWithCacheControl.preconnect.bind(fetchWithCacheControl) }
+                : {}
+            ) as typeof fetch)
+          : fetchWithCacheControl;
+
         const provider = createAnthropic({
           ...normalizedConfig,
           fetch: providerFetch,
