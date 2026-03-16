@@ -20,6 +20,7 @@ import { AsyncMutex } from "@/node/utils/concurrency/asyncMutex";
 import {
   extractOrganizationIdFromTokens,
   isClaudeOauthAuthExpired,
+  isClaudeOauthAuthRevoked,
   parseClaudeOauthAuth,
   type ClaudeOauthAuth,
 } from "@/node/utils/claudeOauthAuth";
@@ -76,24 +77,8 @@ function parseOptionalNumber(value: unknown): number | null {
   return null;
 }
 
-function isInvalidGrantError(errorText: string): boolean {
-  const trimmed = errorText.trim();
-  if (trimmed.length === 0) {
-    return false;
-  }
-
-  try {
-    const json = JSON.parse(trimmed) as unknown;
-    if (isPlainObject(json) && json.error === "invalid_grant") {
-      return true;
-    }
-  } catch {
-    // Ignore parse failures - fall back to substring checks.
-  }
-
-  const lower = trimmed.toLowerCase();
-  return lower.includes("invalid_grant") || lower.includes("revoked");
-}
+// Token revocation detection is handled by the shared
+// isClaudeOauthAuthRevoked() helper in claudeOauthAuth.ts.
 
 export class ClaudeOauthService {
   private readonly desktopFlows = new OAuthFlowManager();
@@ -315,33 +300,41 @@ export class ClaudeOauthService {
   }
 
   async getValidAuth(): Promise<Result<ClaudeOauthAuth, string>> {
-    const stored = this.readStoredAuth();
-    if (!stored) {
-      return Err("Claude OAuth is not configured");
+    try {
+      const stored = this.readStoredAuth();
+      if (!stored) {
+        return Err("Claude OAuth is not configured");
+      }
+
+      if (!isClaudeOauthAuthExpired(stored)) {
+        return Ok(stored);
+      }
+
+      await using _lock = await this.refreshMutex.acquire();
+
+      // Re-read after acquiring lock in case another caller refreshed first.
+      const latest = this.readStoredAuth();
+      if (!latest) {
+        return Err("Claude OAuth is not configured");
+      }
+
+      if (!isClaudeOauthAuthExpired(latest)) {
+        return Ok(latest);
+      }
+
+      const refreshed = await this.refreshTokens(latest);
+      if (!refreshed.success) {
+        return Err(refreshed.error);
+      }
+
+      return Ok(refreshed.data);
+    } catch (error) {
+      // Never throw from getValidAuth — surface all failures as Err so callers
+      // (especially the fetch wrapper) always get a usable Result.
+      const message = getErrorMessage(error);
+      log.warn(`[Claude OAuth] getValidAuth failed unexpectedly: ${message}`);
+      return Err(`Claude OAuth auth failed: ${message}`);
     }
-
-    if (!isClaudeOauthAuthExpired(stored)) {
-      return Ok(stored);
-    }
-
-    await using _lock = await this.refreshMutex.acquire();
-
-    // Re-read after acquiring lock in case another caller refreshed first.
-    const latest = this.readStoredAuth();
-    if (!latest) {
-      return Err("Claude OAuth is not configured");
-    }
-
-    if (!isClaudeOauthAuthExpired(latest)) {
-      return Ok(latest);
-    }
-
-    const refreshed = await this.refreshTokens(latest);
-    if (!refreshed.success) {
-      return Err(refreshed.error);
-    }
-
-    return Ok(refreshed.data);
   }
 
   async dispose(): Promise<void> {
@@ -492,7 +485,7 @@ export class ClaudeOauthService {
 
         // When the refresh token is invalid/revoked, clear persisted auth so subsequent
         // requests fall back to the existing "not connected" behavior.
-        if (isInvalidGrantError(errorText)) {
+        if (isClaudeOauthAuthRevoked(errorText)) {
           log.debug("[Claude OAuth] Refresh token rejected; clearing stored auth");
           const disconnectResult = await this.disconnect();
           if (!disconnectResult.success) {
@@ -500,6 +493,9 @@ export class ClaudeOauthService {
               `[Claude OAuth] Failed to clear stored auth after refresh failure: ${disconnectResult.error}`
             );
           }
+          return Err(
+            "Claude OAuth session expired or revoked — please reconnect in Settings"
+          );
         }
 
         const prefix = `Claude OAuth refresh failed (${response.status})`;

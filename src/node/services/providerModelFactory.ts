@@ -885,7 +885,8 @@ export class ProviderModelFactory {
                 input: Parameters<typeof fetch>[0],
                 init?: Parameters<typeof fetch>[1]
               ): Promise<Response> => {
-                const urlString = typeof input === "string" ? input : input instanceof URL ? input.toString() : "";
+                const urlString =
+                  typeof input === "string" ? input : input instanceof URL ? input.toString() : "";
                 // Only intercept requests to the Anthropic API
                 const isAnthropicRequest =
                   urlString.includes("anthropic.com") ||
@@ -901,7 +902,9 @@ export class ProviderModelFactory {
 
                 const authResult = await claudeOauthService.getValidAuth();
                 if (!authResult.success) {
-                  throw new Error(authResult.error);
+                  // Surface auth failures clearly — includes revocation messages
+                  // that tell the user to reconnect in Settings.
+                  throw new Error(`Claude OAuth: ${authResult.error}`);
                 }
 
                 const headers = new Headers(init?.headers);
@@ -911,7 +914,8 @@ export class ProviderModelFactory {
 
                 return fetchWithCacheControl(input, { ...(init ?? {}), headers });
               },
-              "preconnect" in fetchWithCacheControl && typeof fetchWithCacheControl.preconnect === "function"
+              "preconnect" in fetchWithCacheControl &&
+                typeof fetchWithCacheControl.preconnect === "function"
                 ? { preconnect: fetchWithCacheControl.preconnect.bind(fetchWithCacheControl) }
                 : {}
             ) as typeof fetch)
