@@ -78,6 +78,7 @@ import {
 } from "../../config/schemas/appConfigOnDisk";
 import {
   CacheTtlSchema,
+  ClaudeOauthDefaultAuthSchema,
   CodexOauthDefaultAuthSchema,
   ServiceTierSchema,
 } from "../../config/schemas/providersConfig";
@@ -204,6 +205,13 @@ export const ProviderConfigInfoSchema = z.object({
    * ChatGPT OAuth and an OpenAI API key are configured.
    */
   codexOauthDefaultAuth: CodexOauthDefaultAuthSchema.optional(),
+  /** Anthropic-only: whether Claude OAuth tokens are present in providers.jsonc */
+  claudeOauthSet: z.boolean().optional(),
+  /**
+   * Anthropic-only: default auth precedence to use for Claude-OAuth-allowed models when BOTH
+   * Claude OAuth and an Anthropic API key are configured.
+   */
+  claudeOauthDefaultAuth: ClaudeOauthDefaultAuthSchema.optional(),
   /** AWS-specific fields (only present for bedrock provider) */
   aws: AWSCredentialStatusSchema.optional(),
   /** Mux Gateway-specific fields */

@@ -68,9 +68,16 @@ import { getErrorMessage } from "@/common/utils/errors";
 
 type MuxGatewayLoginStatus = "idle" | "starting" | "waiting" | "success" | "error";
 type CodexOauthFlowStatus = "idle" | "starting" | "waiting" | "error";
+type ClaudeOauthFlowStatus = "idle" | "starting" | "waiting" | "error";
 type CopilotLoginStatus = "idle" | "starting" | "waiting" | "success" | "error";
 
 interface CodexOauthDeviceFlow {
+  flowId: string;
+  userCode: string;
+  verifyUrl: string;
+}
+
+interface ClaudeOauthDeviceFlow {
   flowId: string;
   userCode: string;
   verifyUrl: string;
@@ -396,6 +403,27 @@ export function ProvidersSection() {
   const codexOauthLoginInProgress =
     codexOauthStatus === "starting" || codexOauthStatus === "waiting";
 
+  // Claude OAuth state (mirrors Codex OAuth pattern for Anthropic provider)
+  const [claudeOauthStatus, setClaudeOauthStatus] = useState<ClaudeOauthFlowStatus>("idle");
+  const [claudeOauthError, setClaudeOauthError] = useState<string | null>(null);
+
+  const claudeOauthAttemptRef = useRef(0);
+  const [claudeOauthDesktopFlowId, setClaudeOauthDesktopFlowId] = useState<string | null>(null);
+  const [claudeOauthDeviceFlow, setClaudeOauthDeviceFlow] = useState<ClaudeOauthDeviceFlow | null>(
+    null
+  );
+  const [claudeOauthAuthorizeUrl, setClaudeOauthAuthorizeUrl] = useState<string | null>(null);
+
+  const claudeOauthIsConnected = config?.anthropic?.claudeOauthSet === true;
+  const anthropicApiKeySet =
+    config?.anthropic?.apiKeySet === true || !!config?.anthropic?.apiKeySource;
+  const claudeOauthDefaultAuth =
+    config?.anthropic?.claudeOauthDefaultAuth === "apiKey" ? "apiKey" : "oauth";
+  const claudeOauthDefaultAuthIsEditable = claudeOauthIsConnected && anthropicApiKeySet;
+
+  const claudeOauthLoginInProgress =
+    claudeOauthStatus === "starting" || claudeOauthStatus === "waiting";
+
   const startCodexOauthBrowserConnect = async () => {
     const attempt = ++codexOauthAttemptRef.current;
 
@@ -653,6 +681,263 @@ export function ProvidersSection() {
     setCodexOauthAuthorizeUrl(null);
     setCodexOauthStatus("idle");
     setCodexOauthError(null);
+  };
+
+  // Claude OAuth handlers (mirrors Codex OAuth pattern for Anthropic provider)
+  const startClaudeOauthBrowserConnect = async () => {
+    const attempt = ++claudeOauthAttemptRef.current;
+
+    if (!api) {
+      setClaudeOauthStatus("error");
+      setClaudeOauthError("Mux API not connected.");
+      return;
+    }
+
+    // Best-effort: cancel any in-progress flow before starting a new one.
+    if (claudeOauthDesktopFlowId) {
+      void api.claudeOauth.cancelDesktopFlow({ flowId: claudeOauthDesktopFlowId });
+    }
+    if (claudeOauthDeviceFlow) {
+      void api.claudeOauth.cancelDeviceFlow({ flowId: claudeOauthDeviceFlow.flowId });
+    }
+
+    setClaudeOauthError(null);
+    setClaudeOauthDesktopFlowId(null);
+    setClaudeOauthDeviceFlow(null);
+    setClaudeOauthAuthorizeUrl(null);
+
+    try {
+      setClaudeOauthStatus("starting");
+
+      if (!isDesktop) {
+        const startResult = await api.claudeOauth.startDeviceFlow();
+
+        if (attempt !== claudeOauthAttemptRef.current) {
+          if (startResult.success) {
+            void api.claudeOauth.cancelDeviceFlow({ flowId: startResult.data.flowId });
+          }
+          return;
+        }
+
+        if (!startResult.success) {
+          setClaudeOauthStatus("error");
+          setClaudeOauthError(startResult.error);
+          return;
+        }
+
+        setClaudeOauthDeviceFlow({
+          flowId: startResult.data.flowId,
+          userCode: startResult.data.userCode,
+          verifyUrl: startResult.data.verifyUrl,
+        });
+        setClaudeOauthStatus("waiting");
+
+        const waitResult = await api.claudeOauth.waitForDeviceFlow({
+          flowId: startResult.data.flowId,
+        });
+
+        if (attempt !== claudeOauthAttemptRef.current) {
+          return;
+        }
+
+        if (!waitResult.success) {
+          setClaudeOauthStatus("error");
+          setClaudeOauthError(waitResult.error);
+          return;
+        }
+
+        setClaudeOauthStatus("idle");
+        setClaudeOauthDeviceFlow(null);
+        setClaudeOauthAuthorizeUrl(null);
+        await refresh();
+        return;
+      }
+
+      const startResult = await api.claudeOauth.startDesktopFlow();
+
+      if (attempt !== claudeOauthAttemptRef.current) {
+        if (startResult.success) {
+          void api.claudeOauth.cancelDesktopFlow({ flowId: startResult.data.flowId });
+        }
+        return;
+      }
+
+      if (!startResult.success) {
+        setClaudeOauthStatus("error");
+        setClaudeOauthError(startResult.error);
+        return;
+      }
+
+      const { flowId, authorizeUrl } = startResult.data;
+      setClaudeOauthDesktopFlowId(flowId);
+      setClaudeOauthAuthorizeUrl(authorizeUrl);
+      setClaudeOauthStatus("waiting");
+
+      const waitResult = await api.claudeOauth.waitForDesktopFlow({ flowId });
+
+      if (attempt !== claudeOauthAttemptRef.current) {
+        return;
+      }
+
+      if (!waitResult.success) {
+        setClaudeOauthStatus("error");
+        setClaudeOauthError(waitResult.error);
+        return;
+      }
+
+      setClaudeOauthStatus("idle");
+      setClaudeOauthDesktopFlowId(null);
+      await refresh();
+    } catch (err) {
+      if (attempt !== claudeOauthAttemptRef.current) {
+        return;
+      }
+
+      setClaudeOauthStatus("error");
+      setClaudeOauthError(getErrorMessage(err));
+    }
+  };
+
+  const startClaudeOauthDeviceConnect = async () => {
+    const attempt = ++claudeOauthAttemptRef.current;
+
+    if (!api) {
+      setClaudeOauthStatus("error");
+      setClaudeOauthError("Mux API not connected.");
+      return;
+    }
+
+    // Best-effort: cancel any in-progress flow before starting a new one.
+    if (claudeOauthDesktopFlowId) {
+      void api.claudeOauth.cancelDesktopFlow({ flowId: claudeOauthDesktopFlowId });
+    }
+    if (claudeOauthDeviceFlow) {
+      void api.claudeOauth.cancelDeviceFlow({ flowId: claudeOauthDeviceFlow.flowId });
+    }
+
+    setClaudeOauthError(null);
+    setClaudeOauthDesktopFlowId(null);
+    setClaudeOauthDeviceFlow(null);
+    setClaudeOauthAuthorizeUrl(null);
+
+    try {
+      setClaudeOauthStatus("starting");
+      const startResult = await api.claudeOauth.startDeviceFlow();
+
+      if (attempt !== claudeOauthAttemptRef.current) {
+        if (startResult.success) {
+          void api.claudeOauth.cancelDeviceFlow({ flowId: startResult.data.flowId });
+        }
+        return;
+      }
+
+      if (!startResult.success) {
+        setClaudeOauthStatus("error");
+        setClaudeOauthError(startResult.error);
+        return;
+      }
+
+      setClaudeOauthDeviceFlow({
+        flowId: startResult.data.flowId,
+        userCode: startResult.data.userCode,
+        verifyUrl: startResult.data.verifyUrl,
+      });
+      setClaudeOauthStatus("waiting");
+
+      const waitResult = await api.claudeOauth.waitForDeviceFlow({
+        flowId: startResult.data.flowId,
+      });
+
+      if (attempt !== claudeOauthAttemptRef.current) {
+        return;
+      }
+
+      if (!waitResult.success) {
+        setClaudeOauthStatus("error");
+        setClaudeOauthError(waitResult.error);
+        return;
+      }
+
+      setClaudeOauthStatus("idle");
+      setClaudeOauthDeviceFlow(null);
+      setClaudeOauthAuthorizeUrl(null);
+      await refresh();
+    } catch (err) {
+      if (attempt !== claudeOauthAttemptRef.current) {
+        return;
+      }
+
+      setClaudeOauthStatus("error");
+      setClaudeOauthError(getErrorMessage(err));
+    }
+  };
+
+  const disconnectClaudeOauth = async () => {
+    const attempt = ++claudeOauthAttemptRef.current;
+
+    if (!api) {
+      setClaudeOauthStatus("error");
+      setClaudeOauthError("Mux API not connected.");
+      return;
+    }
+
+    // Best-effort: cancel any in-progress flow.
+    if (claudeOauthDesktopFlowId) {
+      void api.claudeOauth.cancelDesktopFlow({ flowId: claudeOauthDesktopFlowId });
+    }
+    if (claudeOauthDeviceFlow) {
+      void api.claudeOauth.cancelDeviceFlow({ flowId: claudeOauthDeviceFlow.flowId });
+    }
+
+    setClaudeOauthError(null);
+    setClaudeOauthDesktopFlowId(null);
+    setClaudeOauthDeviceFlow(null);
+    setClaudeOauthAuthorizeUrl(null);
+
+    try {
+      setClaudeOauthStatus("starting");
+      const result = await api.claudeOauth.disconnect();
+
+      if (attempt !== claudeOauthAttemptRef.current) {
+        return;
+      }
+
+      if (!result.success) {
+        setClaudeOauthStatus("error");
+        setClaudeOauthError(result.error);
+        return;
+      }
+
+      updateOptimistically("anthropic", { claudeOauthSet: false });
+      setClaudeOauthStatus("idle");
+      await refresh();
+    } catch (err) {
+      if (attempt !== claudeOauthAttemptRef.current) {
+        return;
+      }
+
+      setClaudeOauthStatus("error");
+      setClaudeOauthError(getErrorMessage(err));
+    }
+  };
+
+  const cancelClaudeOauth = () => {
+    claudeOauthAttemptRef.current++;
+
+    if (api) {
+      if (claudeOauthDesktopFlowId) {
+        void api.claudeOauth.cancelDesktopFlow({ flowId: claudeOauthDesktopFlowId });
+      }
+      if (claudeOauthDeviceFlow) {
+        void api.claudeOauth.cancelDeviceFlow({ flowId: claudeOauthDeviceFlow.flowId });
+      }
+    }
+
+    setClaudeOauthDesktopFlowId(null);
+    setClaudeOauthDeviceFlow(null);
+    setClaudeOauthAuthorizeUrl(null);
+    setClaudeOauthStatus("idle");
+    setClaudeOauthError(null);
   };
 
   const [muxGatewayLoginError, setMuxGatewayLoginError] = useState<string | null>(null);
@@ -1348,8 +1633,9 @@ export function ProvidersSection() {
                           </a>
                           {configured &&
                             config?.[provider]?.apiKeySet === false &&
-                            // OpenAI can be configured via ChatGPT OAuth, not just env vars
-                            !(provider === "openai" && codexOauthIsConnected) && (
+                            // OpenAI/Anthropic can be configured via OAuth, not just env vars
+                            !(provider === "openai" && codexOauthIsConnected) &&
+                            !(provider === "anthropic" && claudeOauthIsConnected) && (
                               <div className="text-muted text-xs">
                                 {config?.[provider]?.apiKeySource === "file"
                                   ? "Configured via API key file."
@@ -1852,6 +2138,189 @@ export function ProvidersSection() {
                                 <SelectItem value="disabled">disabled</SelectItem>
                               </SelectContent>
                             </Select>
+                          </div>
+
+                          {/* Claude OAuth */}
+                          <div className="border-border-light space-y-3 border-t pt-3">
+                            <div>
+                              <label className="text-foreground block text-xs font-medium">
+                                Claude OAuth
+                              </label>
+                              <span className="text-muted text-xs">
+                                {claudeOauthStatus === "starting"
+                                  ? "Starting..."
+                                  : claudeOauthStatus === "waiting"
+                                    ? "Waiting for login..."
+                                    : claudeOauthIsConnected
+                                      ? "Connected"
+                                      : "Not connected"}
+                              </span>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-2">
+                              {!isRemoteServer && (
+                                <Button
+                                  size="sm"
+                                  onClick={() => {
+                                    void startClaudeOauthBrowserConnect();
+                                  }}
+                                  disabled={!api || claudeOauthLoginInProgress}
+                                >
+                                  Connect (Browser)
+                                </Button>
+                              )}
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                onClick={() => {
+                                  void startClaudeOauthDeviceConnect();
+                                }}
+                                disabled={!api || claudeOauthLoginInProgress}
+                              >
+                                Connect (Device)
+                              </Button>
+
+                              {claudeOauthStatus === "waiting" &&
+                                !claudeOauthDeviceFlow &&
+                                claudeOauthAuthorizeUrl && (
+                                  <Button
+                                    size="sm"
+                                    aria-label="Copy and open Anthropic authorization page"
+                                    onClick={() => {
+                                      void navigator.clipboard.writeText(claudeOauthAuthorizeUrl);
+                                      window.open(claudeOauthAuthorizeUrl, "_blank", "noopener");
+                                    }}
+                                    className="h-8 px-3 text-xs"
+                                  >
+                                    Copy & Open Anthropic
+                                  </Button>
+                                )}
+
+                              {claudeOauthLoginInProgress && (
+                                <Button variant="secondary" size="sm" onClick={cancelClaudeOauth}>
+                                  Cancel
+                                </Button>
+                              )}
+
+                              {claudeOauthIsConnected && (
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  onClick={() => {
+                                    void disconnectClaudeOauth();
+                                  }}
+                                  disabled={!api || claudeOauthLoginInProgress}
+                                >
+                                  Disconnect
+                                </Button>
+                              )}
+                            </div>
+
+                            {claudeOauthDeviceFlow && (
+                              <div className="bg-background-tertiary space-y-2 rounded-md p-3">
+                                <p className="text-muted text-xs">
+                                  Enter this code on the Anthropic verification page:
+                                </p>
+                                <div className="flex items-center gap-2">
+                                  <code className="text-foreground text-lg font-bold tracking-widest">
+                                    {claudeOauthDeviceFlow.userCode}
+                                  </code>
+                                  <Button
+                                    size="sm"
+                                    aria-label="Copy and open Anthropic verification page"
+                                    onClick={() => {
+                                      void navigator.clipboard.writeText(
+                                        claudeOauthDeviceFlow.userCode
+                                      );
+                                      window.open(
+                                        claudeOauthDeviceFlow.verifyUrl,
+                                        "_blank",
+                                        "noopener"
+                                      );
+                                    }}
+                                    className="h-8 px-3 text-xs"
+                                  >
+                                    Copy & Open Anthropic
+                                  </Button>
+                                </div>
+                                <p className="text-muted inline-flex items-center gap-2 text-xs">
+                                  <Loader2 aria-hidden className="h-3.5 w-3.5 animate-spin" />
+                                  Waiting for authorization...
+                                </p>
+                              </div>
+                            )}
+
+                            {claudeOauthStatus === "waiting" && !claudeOauthDeviceFlow && (
+                              <p className="text-muted inline-flex items-center gap-2 text-xs">
+                                <Loader2 aria-hidden className="h-3.5 w-3.5 animate-spin" />
+                                Waiting for authorization...
+                              </p>
+                            )}
+
+                            {claudeOauthStatus === "error" && claudeOauthError && (
+                              <p className="text-destructive text-xs">{claudeOauthError}</p>
+                            )}
+
+                            <div className="border-border-light space-y-2 border-t pt-3">
+                              <div>
+                                <label className="text-muted block text-xs">
+                                  Default auth (when both are set)
+                                </label>
+                                <p className="text-muted text-xs">
+                                  Applies to models that support both Claude OAuth and API keys.
+                                </p>
+                              </div>
+
+                              <ToggleGroup
+                                type="single"
+                                value={claudeOauthDefaultAuth}
+                                onValueChange={(next) => {
+                                  if (!api) return;
+                                  if (next !== "oauth" && next !== "apiKey") {
+                                    return;
+                                  }
+
+                                  updateOptimistically("anthropic", {
+                                    claudeOauthDefaultAuth: next,
+                                  });
+                                  void api.providers.setProviderConfig({
+                                    provider: "anthropic",
+                                    keyPath: ["claudeOauthDefaultAuth"],
+                                    value: next,
+                                  });
+                                }}
+                                size="sm"
+                                className="h-9"
+                                disabled={!api || !claudeOauthDefaultAuthIsEditable}
+                              >
+                                <ToggleGroupItem
+                                  value="oauth"
+                                  size="sm"
+                                  className="h-7 px-3 text-[13px]"
+                                >
+                                  Use Claude OAuth by default
+                                </ToggleGroupItem>
+                                <ToggleGroupItem
+                                  value="apiKey"
+                                  size="sm"
+                                  className="h-7 px-3 text-[13px]"
+                                >
+                                  Use Anthropic API key by default
+                                </ToggleGroupItem>
+                              </ToggleGroup>
+
+                              <p className="text-muted text-xs">
+                                Claude OAuth uses subscription billing (costs included). API key
+                                uses Anthropic platform billing.
+                              </p>
+
+                              {!claudeOauthDefaultAuthIsEditable && (
+                                <p className="text-muted text-xs">
+                                  Connect Claude OAuth and set an Anthropic API key to change this
+                                  setting.
+                                </p>
+                              )}
+                            </div>
                           </div>
                         </>
                       )}

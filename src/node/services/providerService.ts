@@ -25,6 +25,7 @@ import {
   resolveProviderCredentials,
 } from "@/node/utils/providerRequirements";
 import { parseCodexOauthAuth } from "@/node/utils/codexOauthAuth";
+import { parseClaudeOauthAuth } from "@/node/utils/claudeOauthAuth";
 import type { PolicyService } from "@/node/services/policyService";
 import { getErrorMessage } from "@/common/utils/errors";
 
@@ -117,6 +118,8 @@ export class ProviderService {
         disableBetaFeatures?: unknown;
         /** OpenAI-only: default auth precedence for Codex-OAuth-allowed models. */
         codexOauthDefaultAuth?: unknown;
+        /** Anthropic-only: default auth precedence for Claude-OAuth-allowed models. */
+        claudeOauthDefaultAuth?: unknown;
         region?: string;
         /** Optional AWS shared config profile name (equivalent to AWS_PROFILE). */
         profile?: string;
@@ -127,6 +130,8 @@ export class ProviderService {
         enabled?: unknown;
         /** OpenAI-only: stored Codex OAuth tokens (never sent to frontend). */
         codexOauth?: unknown;
+        /** Anthropic-only: stored Claude OAuth tokens (never sent to frontend). */
+        claudeOauth?: unknown;
       };
 
       const forcedBaseUrl = this.policyService?.isEnforced()
@@ -144,6 +149,8 @@ export class ProviderService {
 
       const codexOauthSet =
         provider === "openai" && parseCodexOauthAuth(config.codexOauth) !== null;
+      const claudeOauthSet =
+        provider === "anthropic" && parseClaudeOauthAuth(config.claudeOauth) !== null;
       const apiKeyIsOpRef = isOpReference(config.apiKey);
       let isEnabled = !isProviderDisabledInConfig(config);
       if (provider === "mux-gateway" && mainConfig.muxGatewayEnabled === false) {
@@ -208,6 +215,15 @@ export class ProviderService {
           providerInfo.codexOauthDefaultAuth = codexOauthDefaultAuth;
         }
       }
+
+      if (provider === "anthropic") {
+        providerInfo.claudeOauthSet = claudeOauthSet;
+
+        const claudeOauthDefaultAuth = config.claudeOauthDefaultAuth;
+        if (claudeOauthDefaultAuth === "oauth" || claudeOauthDefaultAuth === "apiKey") {
+          providerInfo.claudeOauthDefaultAuth = claudeOauthDefaultAuth;
+        }
+      }
       // AWS/Bedrock-specific fields
       if (provider === "bedrock") {
         providerInfo.aws = {
@@ -240,6 +256,9 @@ export class ProviderService {
       providerInfo.apiKeySource = configCheck.apiKeySource;
 
       if (provider === "openai" && isEnabled && codexOauthSet) {
+        providerInfo.isConfigured = true;
+      }
+      if (provider === "anthropic" && isEnabled && claudeOauthSet) {
         providerInfo.isConfigured = true;
       }
 
