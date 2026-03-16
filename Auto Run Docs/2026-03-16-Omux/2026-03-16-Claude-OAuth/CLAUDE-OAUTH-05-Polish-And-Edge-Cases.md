@@ -34,10 +34,11 @@ Also reference the Codex OAuth error handling patterns:
   - Search for how Codex handles this (likely the UI checks `codexOauth` in provider config and `getValidAuth` status)
   - *(Implemented: `claudeOauth.checkAuth` ORPC method calls `getValidAuth()` and maps to `Result<void, string>`. Frontend calls it on mount when `claudeOauthIsConnected` is true; on error, shows "Session expired — please reconnect" in destructive color. Codex has no equivalent — this is a Claude OAuth improvement.)*
 
-- [ ] Review and align with existing provider patterns:
+- [x] Review and align with existing provider patterns:
   - Search `src/common/constants/providers.ts` for the Anthropic provider definition — ensure `requiresApiKey` or similar flags are updated to reflect that API key is optional when OAuth is available
   - Check if there's a provider status/health check mechanism that should report Claude OAuth status
   - Ensure the known models list in `knownModels.ts` doesn't need updates (all Anthropic models should be OAuth-allowed)
+  - *(Reviewed: `requiresApiKey: true` stays correct — matches Codex OAuth pattern where the flag stays true but OAuth is handled as a special credential path. Added `parseClaudeOauthAuth` check to `hasAnyConfiguredProvider()` in `providerRequirements.ts` so CLI bootstrap recognizes Claude OAuth-only setups as valid. `providerService.ts` already marks anthropic as `isConfigured` when `claudeOauthSet` is true (line 261). `knownModels.ts` lists `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5` — exactly matching `CLAUDE_OAUTH_ALLOWED_MODELS`. No health check mechanism exists beyond per-request `getValidAuth()` and the `checkAuth` ORPC method.)*
 
 - [ ] Final compilation and full test suite:
   - Run `make typecheck` — zero errors

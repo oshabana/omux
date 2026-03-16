@@ -20,6 +20,7 @@ import type {
 } from "@/common/config/schemas/providersConfig";
 import type { ProviderConfig, ProvidersConfig } from "@/node/config";
 import { parseCodexOauthAuth } from "@/node/utils/codexOauthAuth";
+import { parseClaudeOauthAuth } from "@/node/utils/claudeOauthAuth";
 
 // ============================================================================
 // Environment variable mappings - single source of truth
@@ -356,6 +357,14 @@ export function hasAnyConfiguredProvider(providers: ProvidersConfig | null | und
     if (
       providerKey === "openai" &&
       parseCodexOauthAuth((rawConfig as { codexOauth?: unknown }).codexOauth) !== null
+    ) {
+      return true;
+    }
+
+    // Anthropic Claude OAuth is a valid credential path even without apiKey.
+    if (
+      providerKey === "anthropic" &&
+      parseClaudeOauthAuth((rawConfig as { claudeOauth?: unknown }).claudeOauth) !== null
     ) {
       return true;
     }
