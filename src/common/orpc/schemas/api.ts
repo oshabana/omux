@@ -458,6 +458,10 @@ export const claudeOauth = {
     input: z.void(),
     output: ResultSchema(z.void(), z.string()),
   },
+  checkAuth: {
+    input: z.void(),
+    output: ResultSchema(z.void(), z.string()),
+  },
 };
 // Mux Gateway
 export const muxGateway = {

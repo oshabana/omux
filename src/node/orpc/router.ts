@@ -1810,6 +1810,14 @@ export const router = (authToken?: string) => {
         .handler(({ context }) => {
           return context.claudeOauthService.disconnect();
         }),
+      checkAuth: t
+        .input(schemas.claudeOauth.checkAuth.input)
+        .output(schemas.claudeOauth.checkAuth.output)
+        .handler(async ({ context }) => {
+          const result = await context.claudeOauthService.getValidAuth();
+          // Map Ok<ClaudeOauthAuth> → Ok<void>; don't leak tokens to the frontend.
+          return result.success ? { success: true, data: undefined } : result;
+        }),
     },
     general: {
       listDirectory: t

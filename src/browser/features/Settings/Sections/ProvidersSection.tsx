@@ -424,6 +424,27 @@ export function ProvidersSection() {
   const claudeOauthLoginInProgress =
     claudeOauthStatus === "starting" || claudeOauthStatus === "waiting";
 
+  // When the settings page shows "Connected", validate that the stored tokens
+  // are still usable. If they've been revoked or expired server-side, the
+  // backend will clear them and return an error — surface it so the user
+  // sees "Session expired" instead of a stale "Connected" badge.
+  const [claudeOauthSessionExpired, setClaudeOauthSessionExpired] = useState(false);
+  const claudeOauthCheckRanRef = useRef(false);
+  if (api && claudeOauthIsConnected && !claudeOauthLoginInProgress && !claudeOauthCheckRanRef.current) {
+    claudeOauthCheckRanRef.current = true;
+    void api.claudeOauth.checkAuth().then((result) => {
+      if (!result.success) {
+        setClaudeOauthSessionExpired(true);
+        setClaudeOauthError(result.error);
+      }
+    });
+  }
+  // Reset when the user disconnects or reconnects.
+  if (!claudeOauthIsConnected && claudeOauthCheckRanRef.current) {
+    claudeOauthCheckRanRef.current = false;
+    setClaudeOauthSessionExpired(false);
+  }
+
   const startCodexOauthBrowserConnect = async () => {
     const attempt = ++codexOauthAttemptRef.current;
 
@@ -2146,14 +2167,18 @@ export function ProvidersSection() {
                               <label className="text-foreground block text-xs font-medium">
                                 Claude OAuth
                               </label>
-                              <span className="text-muted text-xs">
+                              <span
+                                className={`text-xs ${claudeOauthSessionExpired ? "text-destructive" : "text-muted"}`}
+                              >
                                 {claudeOauthStatus === "starting"
                                   ? "Starting..."
                                   : claudeOauthStatus === "waiting"
                                     ? "Waiting for login..."
-                                    : claudeOauthIsConnected
-                                      ? "Connected"
-                                      : "Not connected"}
+                                    : claudeOauthSessionExpired
+                                      ? "Session expired — please reconnect"
+                                      : claudeOauthIsConnected
+                                        ? "Connected"
+                                        : "Not connected"}
                               </span>
                             </div>
 
