@@ -233,6 +233,7 @@ export {
   copilotOauth,
   muxGovernorOauth,
   codexOauth,
+  claudeOauth,
   policy,
   providers,
   ProvidersConfigMapSchema,

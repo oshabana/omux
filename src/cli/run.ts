@@ -18,6 +18,7 @@ import { Config, type ProjectConfig } from "../node/config";
 import { DisposableTempDir } from "../node/services/tempDir";
 import { AgentSession, type AgentSessionChatEvent } from "../node/services/agentSession";
 import { CodexOauthService } from "../node/services/codexOauthService";
+import { ClaudeOauthService } from "../node/services/claudeOauthService";
 import { createCoreServices } from "../node/services/coreServices";
 import {
   isCaughtUpMessage,
@@ -476,6 +477,9 @@ async function main(): Promise<number> {
   // OAuth tokens from providers.jsonc.
   const codexOauthService = new CodexOauthService(config, providerService);
   aiService.setCodexOauthService(codexOauthService);
+
+  // Wire Claude OAuth for Anthropic OAuth-routed requests.
+  const claudeOauthService = new ClaudeOauthService(config, providerService);
 
   // CLI-only exit code control: allows agent to set the process exit code
   // Useful for CI workflows where the agent should block merge on failure
@@ -1112,6 +1116,7 @@ async function main(): Promise<number> {
     session.dispose();
     mcpServerManager.dispose();
     await codexOauthService.dispose();
+    await claudeOauthService.dispose();
     if (!keepBackgroundProcesses) {
       await backgroundProcessManager.terminateAll();
     }

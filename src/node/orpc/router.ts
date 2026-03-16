@@ -1763,6 +1763,54 @@ export const router = (authToken?: string) => {
           return context.codexOauthService.disconnect();
         }),
     },
+    claudeOauth: {
+      startDesktopFlow: t
+        .input(schemas.claudeOauth.startDesktopFlow.input)
+        .output(schemas.claudeOauth.startDesktopFlow.output)
+        .handler(({ context }) => {
+          return context.claudeOauthService.startDesktopFlow();
+        }),
+      waitForDesktopFlow: t
+        .input(schemas.claudeOauth.waitForDesktopFlow.input)
+        .output(schemas.claudeOauth.waitForDesktopFlow.output)
+        .handler(({ context, input }) => {
+          return context.claudeOauthService.waitForDesktopFlow(input.flowId, {
+            timeoutMs: input.timeoutMs,
+          });
+        }),
+      cancelDesktopFlow: t
+        .input(schemas.claudeOauth.cancelDesktopFlow.input)
+        .output(schemas.claudeOauth.cancelDesktopFlow.output)
+        .handler(async ({ context, input }) => {
+          await context.claudeOauthService.cancelDesktopFlow(input.flowId);
+        }),
+      startDeviceFlow: t
+        .input(schemas.claudeOauth.startDeviceFlow.input)
+        .output(schemas.claudeOauth.startDeviceFlow.output)
+        .handler(({ context }) => {
+          return context.claudeOauthService.startDeviceFlow();
+        }),
+      waitForDeviceFlow: t
+        .input(schemas.claudeOauth.waitForDeviceFlow.input)
+        .output(schemas.claudeOauth.waitForDeviceFlow.output)
+        .handler(({ context, input }) => {
+          return context.claudeOauthService.waitForDeviceFlow(input.flowId, {
+            timeoutMs: input.timeoutMs,
+          });
+        }),
+      cancelDeviceFlow: t
+        .input(schemas.claudeOauth.cancelDeviceFlow.input)
+        .output(schemas.claudeOauth.cancelDeviceFlow.output)
+        .handler(async ({ context, input }) => {
+          await context.claudeOauthService.cancelDeviceFlow(input.flowId);
+        }),
+      disconnect: t
+        .input(schemas.claudeOauth.disconnect.input)
+        .output(schemas.claudeOauth.disconnect.output)
+        .handler(({ context }) => {
+          return context.claudeOauthService.disconnect();
+        }),
+    },
     general: {
       listDirectory: t
         .input(schemas.general.listDirectory.input)

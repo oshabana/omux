@@ -402,6 +402,55 @@ export const codexOauth = {
     output: ResultSchema(z.void(), z.string()),
   },
 };
+// Claude OAuth (Anthropic subscription auth)
+export const claudeOauth = {
+  startDesktopFlow: {
+    input: z.void(),
+    output: ResultSchema(z.object({ flowId: z.string(), authorizeUrl: z.string() }), z.string()),
+  },
+  waitForDesktopFlow: {
+    input: z
+      .object({
+        flowId: z.string(),
+        timeoutMs: z.number().int().positive().optional(),
+      })
+      .strict(),
+    output: ResultSchema(z.void(), z.string()),
+  },
+  cancelDesktopFlow: {
+    input: z.object({ flowId: z.string() }).strict(),
+    output: z.void(),
+  },
+  startDeviceFlow: {
+    input: z.void(),
+    output: ResultSchema(
+      z.object({
+        flowId: z.string(),
+        userCode: z.string(),
+        verifyUrl: z.string(),
+        intervalSeconds: z.number().int().positive(),
+      }),
+      z.string()
+    ),
+  },
+  waitForDeviceFlow: {
+    input: z
+      .object({
+        flowId: z.string(),
+        timeoutMs: z.number().int().positive().optional(),
+      })
+      .strict(),
+    output: ResultSchema(z.void(), z.string()),
+  },
+  cancelDeviceFlow: {
+    input: z.object({ flowId: z.string() }).strict(),
+    output: z.void(),
+  },
+  disconnect: {
+    input: z.void(),
+    output: ResultSchema(z.void(), z.string()),
+  },
+};
 // Mux Gateway
 export const muxGateway = {
   getAccountStatus: {
