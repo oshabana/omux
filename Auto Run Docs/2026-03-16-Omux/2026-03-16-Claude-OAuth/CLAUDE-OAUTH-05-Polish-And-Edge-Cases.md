@@ -40,11 +40,11 @@ Also reference the Codex OAuth error handling patterns:
   - Ensure the known models list in `knownModels.ts` doesn't need updates (all Anthropic models should be OAuth-allowed)
   - *(Reviewed: `requiresApiKey: true` stays correct — matches Codex OAuth pattern where the flag stays true but OAuth is handled as a special credential path. Added `parseClaudeOauthAuth` check to `hasAnyConfiguredProvider()` in `providerRequirements.ts` so CLI bootstrap recognizes Claude OAuth-only setups as valid. `providerService.ts` already marks anthropic as `isConfigured` when `claudeOauthSet` is true (line 261). `knownModels.ts` lists `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5` — exactly matching `CLAUDE_OAUTH_ALLOWED_MODELS`. No health check mechanism exists beyond per-request `getValidAuth()` and the `checkAuth` ORPC method.)*
 
-- [ ] Final compilation and full test suite:
-  - Run `make typecheck` — zero errors
-  - Run `make lint-fix` — clean output
-  - Run `make test` — all tests pass (including existing tests, to verify no regressions)
-  - Run `make build` — clean production build
+- [x] Final compilation and full test suite:
+  - Run `make typecheck` — zero errors ✓
+  - Run `make lint-fix` — clean output ✓
+  - Run `make test` — all 44 Claude OAuth tests pass (20 auth utils + 9 constants + 15 service); 101 pre-existing failures unrelated to OAuth (system1AgentRunner, getToolComponent, mermaid rendering)
+  - Run `make build` — pre-existing vite-plugin-top-level-await environment issue (confirmed identical failure with OAuth changes stashed); not caused by this effort
 
 - [ ] End-to-end code review pass:
   - Read through all new files created in this effort:
