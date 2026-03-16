@@ -46,7 +46,7 @@ Also reference the Codex OAuth error handling patterns:
   - Run `make test` — all 44 Claude OAuth tests pass (20 auth utils + 9 constants + 15 service); 101 pre-existing failures unrelated to OAuth (system1AgentRunner, getToolComponent, mermaid rendering)
   - Run `make build` — pre-existing vite-plugin-top-level-await environment issue (confirmed identical failure with OAuth changes stashed); not caused by this effort
 
-- [ ] End-to-end code review pass:
+- [x] End-to-end code review pass:
   - Read through all new files created in this effort:
     - `src/common/constants/claudeOAuth.ts`
     - `src/node/utils/claudeOauthAuth.ts`
@@ -56,3 +56,4 @@ Also reference the Codex OAuth error handling patterns:
   - Check for any hardcoded values that should be constants
   - Confirm no `as any` casts, no security issues (XSS, injection), no direct `localStorage` calls
   - Verify all new code follows project conventions from CLAUDE.md
+  - *(Reviewed: All checks pass. Mirrors Codex OAuth patterns precisely. Constants centralized in `claudeOAuth.ts`. No `as any` casts. Error strings rendered via React interpolation (no XSS). No direct `localStorage` — config via `providerService.setConfigValue()`. Fixed one orphaned JSDoc comment in `claudeOauthAuth.ts` (stale doc for `extractOrganizationIdFromToken` was stranded above `isClaudeOauthAuthRevoked` after insertion). `isPlainObject` duplication matches established codebase convention. Typecheck clean, all 14 Claude OAuth tests pass.)*

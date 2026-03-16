@@ -56,9 +56,6 @@ export function isClaudeOauthAuthExpired(
 }
 
 /**
- * Extract organization id from Claude OAuth JWT claims.
- */
-/**
  * Detect whether an error response from Anthropic's token endpoint indicates
  * the grant has been revoked or is otherwise permanently invalid.
  * Checks for `invalid_grant`, `revoked`, or `unauthorized` signals.
@@ -89,6 +86,7 @@ export function isClaudeOauthAuthRevoked(errorText: string): boolean {
   );
 }
 
+/** Extract organization id from Claude OAuth JWT claims. */
 export function extractOrganizationIdFromToken(token: string): string | null {
   const claims = parseJwtClaims(token);
   if (!claims) {
